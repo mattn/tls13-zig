@@ -147,7 +147,7 @@ pub fn TLSClientImpl(comptime ReaderType: type, comptime WriterType: type, compt
             try res.supported_groups.append(.secp256r1);
 
             try res.key_shares.append(.x25519);
-            try res.key_shares.append(.secp256r1);
+            //try res.key_shares.append(.secp256r1);
 
             try res.cipher_suites.append(.TLS_AES_128_GCM_SHA256);
             try res.cipher_suites.append(.TLS_AES_256_GCM_SHA384);
@@ -245,7 +245,7 @@ pub fn TLSClientImpl(comptime ReaderType: type, comptime WriterType: type, compt
         }
 
         pub fn connect(self: *Self, host: []const u8, port: u16) !void {
-            if (is_tcp) {
+            if (is_tcp and !self.io_init) {
                 // establish tcp connection.
                 var stream = try net.tcpConnectToHost(self.allocator, host, port);
                 self.reader = stream.reader();
@@ -454,8 +454,20 @@ pub fn TLSClientImpl(comptime ReaderType: type, comptime WriterType: type, compt
             }
 
             if (sh.is_hello_retry_request) {
-                // currently, HRR is not supported.
-                return Error.UnexpectedMessage;
+                if (self.already_recv_hrr) {
+                    return Error.UnexpectedMessage;
+                }
+                self.already_recv_hrr = true;
+
+                const ks = (try msg.getExtension(sh.extensions, .key_share)).key_share;
+                if (ks.selected != .x25519 and ks.selected != .secp256r1) {
+                    return Error.UnsupportedKeyShareAlgorithm;
+                }
+
+                self.key_shares.clearAndFree();
+                try self.key_shares.append(ks.selected);
+                self.state = .SEND_CH;
+                return;
             }
 
             const ks = (try msg.getExtension(sh.extensions, .key_share)).key_share;
@@ -468,7 +480,7 @@ pub fn TLSClientImpl(comptime ReaderType: type, comptime WriterType: type, compt
                 return Error.UnsupportedKeyShareAlgorithm;
             }
 
-            const zero_bytes = &([_]u8{0} ** 64);
+            const zero_bytes = &([_]u8{0} ** crypto.Hkdf.MAX_DIGEST_LENGTH);
             const server_pubkey = key_entry.key_exchange;
             switch (key_entry.group) {
                 .x25519 => {
@@ -483,7 +495,6 @@ pub fn TLSClientImpl(comptime ReaderType: type, comptime WriterType: type, compt
                 },
                 else => unreachable,
             }
-
             try self.ks.generateHandshakeSecrets(self.msgs_stream.getWritten());
 
             self.hs_protector = RecordPayloadProtector.init(self.ks.aead, self.ks.secret.c_hs_keys, self.ks.secret.s_hs_keys);
